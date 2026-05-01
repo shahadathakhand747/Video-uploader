@@ -1,0 +1,112 @@
+name: Sync videos.json to Telegram Mini App
+
+  on:
+    schedule:
+      # Runs at 18:00 UTC = Midnight Bangladesh Standard Time (UTC+6)
+      - cron: '0 18 * * *'
+    workflow_dispatch:
+      inputs:
+        reason:
+          description: 'Reason for manual sync'
+          required: false
+          default: 'Manual sync triggered'
+
+  permissions:
+    contents: read
+
+  jobs:
+    sync-videos:
+      name: Sync videos.json to Censor-coin-telegram-app
+      runs-on: ubuntu-latest
+      timeout-minutes: 10
+
+      steps:
+        - name: Checkout Video-uploader repo
+          uses: actions/checkout@v4
+
+        - name: Verify videos.json exists
+          run: |
+            if [ ! -f "videos.json" ]; then
+              echo "ERROR: videos.json not found in repository root!"
+              exit 1
+            fi
+            echo "videos.json found. Size: $(wc -c < videos.json) bytes"
+            echo "Entry count: $(cat videos.json | python3 -c 'import sys,json; data=json.load(sys.stdin); print(len(data) if isinstance(data, list) else "object")')"
+
+        - name: Validate videos.json is valid JSON
+          run: |
+            python3 -c "import json, sys; json.load(open('videos.json')); print('JSON is valid')"
+
+        - name: Get current SHA of videos.json in target repo
+          id: get_sha
+          env:
+            TARGET_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          run: |
+            RESPONSE=$(curl -s -H "Authorization: Bearer $TARGET_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/shahadathakhand747/Censor-coin-telegram-app/contents/artifacts/censor-coin/public/videos.json")
+
+            SHA=$(echo "$RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin).get('sha', ''))")
+
+            if [ -z "$SHA" ]; then
+              echo "ERROR: Could not retrieve SHA of target file"
+              echo "API Response: $RESPONSE"
+              exit 1
+            fi
+
+            echo "sha=$SHA" >> $GITHUB_OUTPUT
+            echo "Current SHA of target videos.json: $SHA"
+
+        - name: Encode videos.json to Base64
+          id: encode
+          run: |
+            ENCODED=$(base64 -w 0 videos.json)
+            echo "encoded=$ENCODED" >> $GITHUB_OUTPUT
+            echo "File encoded to base64 successfully"
+
+        - name: Push videos.json to Censor-coin-telegram-app
+          env:
+            TARGET_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+            FILE_SHA: ${{ steps.get_sha.outputs.sha }}
+            FILE_CONTENT: ${{ steps.encode.outputs.encoded }}
+          run: |
+            BD_DATE=$(TZ="Asia/Dhaka" date "+%Y-%m-%d %H:%M:%S %Z")
+            COMMIT_MSG="chore: auto-sync videos.json — $BD_DATE"
+
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+              -H "Authorization: Bearer $TARGET_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/shahadathakhand747/Censor-coin-telegram-app/contents/artifacts/censor-coin/public/videos.json" \
+              -d "{
+                \"message\": \"$COMMIT_MSG\",
+                \"content\": \"$FILE_CONTENT\",
+                \"sha\": \"$FILE_SHA\"
+              }")
+
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | head -n -1)
+
+            echo "HTTP Status: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "SUCCESS: videos.json synced to Censor-coin-telegram-app"
+              echo "Commit URL: $(echo "$BODY" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('commit', {}).get('html_url', 'N/A'))")"
+            else
+              echo "ERROR: Failed to update videos.json — HTTP $HTTP_CODE"
+              echo "Response: $BODY"
+              exit 1
+            fi
+
+        - name: Summary
+          if: success()
+          run: |
+            BD_TIME=$(TZ="Asia/Dhaka" date "+%A, %B %d %Y at %I:%M %p %Z")
+            echo "## Sync Summary" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Status:** SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "- **Synced at:** $BD_TIME" >> $GITHUB_STEP_SUMMARY
+            echo "- **Source:** `Video-uploader/videos.json`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Destination:** `Censor-coin-telegram-app/artifacts/censor-coin/public/videos.json`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+  
